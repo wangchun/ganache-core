@@ -1,6 +1,8 @@
 import { InternalOptions, ServerOptions, serverOptionsConfig } from "./options";
 
-import uWS, { TemplatedApp, us_listen_socket } from "uWebSockets.js";
+import { TemplatedApp, us_listen_socket } from "uWebSockets.js";
+// import uWS, { us_listen_socket_close } from "uWebSockets.js";
+import uWS, { us_listen_socket_close } from "./uws/uws";
 import { Connector, DefaultFlavor } from "@ganache/flavors";
 import ConnectorLoader from "./connector-loader";
 import WebsocketServer, { WebSocketCapableFlavor } from "./servers/ws-server";
@@ -67,7 +69,7 @@ export default class Server {
 
     const _app = (this.#app = uWS.App());
 
-    if (this.#options.server.ws) {
+    if (false && this.#options.server.ws) {
       this.#websocketServer = new WebsocketServer(
         _app,
         connector as WebSocketCapableFlavor,
@@ -110,7 +112,7 @@ export default class Server {
     this.#status = Status.opening;
 
     const promise = new Promise(
-      (resolve: (listenSocket: false | uWS.us_listen_socket) => void) => {
+      (resolve: (listenSocket: false | us_listen_socket) => void) => {
         // Make sure we have *exclusive* use of this port.
         // https://github.com/uNetworking/uSockets/commit/04295b9730a4d413895fa3b151a7337797dcb91f#diff-79a34a07b0945668e00f805838601c11R51
         const LIBUS_LISTEN_EXCLUSIVE_PORT = 1;
@@ -158,7 +160,13 @@ export default class Server {
     this.#status = Status.closing;
     this.#listenSocket = void 0;
     // close the socket to prevent any more connections
-    uWS.us_listen_socket_close(_listenSocket);
+    if (typeof (_listenSocket as any).close === "function") {
+      await new Promise(resolve => {
+        (_listenSocket as any).close(resolve);
+      });
+    } else {
+      us_listen_socket_close(_listenSocket);
+    }
     // close all the connected websockets:
     const ws = this.#websocketServer;
     if (ws) {
