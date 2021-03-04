@@ -9,12 +9,17 @@ import { DealInfo } from "./things/deal-info";
 import Balance from "./things/balance";
 import { StartDealParams } from "./things/start-deal-params";
 import { StorageDealStatus } from "./types/storage-deal-status";
-import IPFSServer, { IPFSNode } from "./ipfs-server";
+import IPFSServer from "./ipfs-server";
 import dagCBOR from "ipld-dag-cbor";
 import { RetrievalOrder } from "./things/retrieval-order";
 import { FilecoinInternalOptions } from "@ganache/filecoin-options";
 import { QueryOffer } from "./things/query-offer";
 import { Ticket } from "./things/ticket";
+import { FileRef } from "./things/file-ref";
+import fs from "fs";
+import path from "path";
+import { IPFS, CID as IPFS_CID } from "ipfs";
+import { rootCertificates } from "tls";
 
 export type BlockchainEvents = {
   ready(): void;
@@ -80,7 +85,7 @@ export default class Blockchain extends Emittery.Typed<
     );
 
     // Create the IPFS server
-    this.ipfsServer = new IPFSServer(this.options.chain.ipfsPort);
+    this.ipfsServer = new IPFSServer(this.options.chain);
 
     // Fire up the miner if necessary
     if (this.options.miner.blockTime > 0) {
@@ -130,7 +135,7 @@ export default class Blockchain extends Emittery.Typed<
     await this.ipfsServer.stop();
   }
 
-  get ipfs(): IPFSNode | null {
+  get ipfs(): IPFS | null {
     return this.ipfsServer.node;
   }
 
@@ -213,13 +218,70 @@ export default class Blockchain extends Emittery.Typed<
       timeout: 500 // Enforce a timeout; otherwise will hang if CID not found
     });
 
-    return stat.DataSize;
+    return stat.CumulativeSize;
+  }
+
+  private async downloadFile(cid: string, ref: FileRef): Promise<void> {
+    if (!this.ipfsServer.node) {
+      throw new Error("IPFS server is not running");
+    }
+
+    const dirname = path.dirname(ref.path);
+    let fileStream: fs.WriteStream;
+    try {
+      try {
+        if (!fs.existsSync(dirname)) {
+          await fs.promises.mkdir(dirname, { recursive: true });
+        }
+        fileStream = fs.createWriteStream(`${ref.path}.partial`, {
+          encoding: "binary"
+        });
+      } catch (e) {
+        throw new Error(
+          `Could not create file.\n  CID: ${cid}\n  Path: ${
+            ref.path
+          }\n  Error: ${e.toString()}`
+        );
+      }
+
+      const chunks = this.ipfsServer.node.files.read(new IPFS_CID(cid), {
+        timeout: 500 // Enforce a timeout; otherwise will hang if CID not found
+      });
+
+      for await (const chunk of chunks) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const shouldContinue = fileStream.write(chunk, error => {
+              if (error) {
+                reject(error);
+              } else {
+                if (shouldContinue) {
+                  resolve();
+                } else {
+                  fileStream.once("drain", resolve);
+                }
+              }
+            });
+          });
+        } catch (e) {
+          throw new Error(
+            `Could not save file.\n  CID: ${cid}\n  Path: ${
+              ref.path
+            }\n  Error: ${e.toString()}`
+          );
+        }
+      }
+
+      await fs.promises.rename(`${ref.path}.partial`, ref.path);
+    } finally {
+      // @ts-ignore
+      if (fileStream) {
+        fileStream.close();
+      }
+    }
   }
 
   async startDeal(proposal: StartDealParams): Promise<RootCID> {
-    // Get size of IPFS object represented by the proposal
-    let size = await this.getIPFSObjectSize(proposal.data.root.root.value);
-
     let signature = await this.address.signProposal(proposal);
 
     // TODO: I'm not sure if should pass in a hex string or the Buffer alone.
@@ -235,8 +297,10 @@ export default class Blockchain extends Emittery.Typed<
       state: StorageDealStatus.Validating, // Not sure if this is right, but we'll start here
       message: "",
       provider: this.miner,
-      pieceCid: null,
-      size: size,
+      pieceCid: proposal.data.pieceCid,
+      size:
+        proposal.data.pieceSize ||
+        (await this.getIPFSObjectSize(proposal.data.root.root.value)),
       pricePerEpoch: proposal.epochPrice,
       duration: proposal.minBlocksDuration,
       dealId: this.deals.length + 1
@@ -275,18 +339,14 @@ export default class Blockchain extends Emittery.Typed<
     });
   }
 
-  async retrieve(retrievalOrder: RetrievalOrder): Promise<void> {
-    // Since this is a simulator, we're not actually interacting with other
-    // IPFS and Filecoin nodes. Because of this, there's no need to
-    // actually retrieve anything. That said, we'll check to make sure
-    // we have the content locally in our IPFS server, and error if it
-    // doesn't exist.
-
+  async retrieve(retrievalOrder: RetrievalOrder, ref: FileRef): Promise<void> {
     let hasLocal: boolean = await this.hasLocal(retrievalOrder.root.root.value);
 
     if (!hasLocal) {
       throw new Error(`Object not found: ${retrievalOrder.root.root.value}`);
     }
+
+    await this.downloadFile(retrievalOrder.root.root.value, ref);
 
     this.#balance = this.#balance.sub(retrievalOrder.total);
   }

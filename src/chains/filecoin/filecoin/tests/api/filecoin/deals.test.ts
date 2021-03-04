@@ -11,6 +11,10 @@ import { SerializedDealInfo } from "../../../src/things/deal-info";
 import { SerializedRetrievalOrder } from "../../../src/things/retrieval-order";
 import BN from "bn.js";
 import { SerializedQueryOffer } from "../../../src/things/query-offer";
+import { SerializedFileRef } from "../../../src/things/file-ref";
+import tmp from "tmp-promise";
+import path from "path";
+import fs from "fs";
 
 const LotusRPC = require("@filecoin-shipyard/lotus-client-rpc").LotusRPC;
 
@@ -20,8 +24,11 @@ describe("api", () => {
   describe("filecoin", () => {
     let provider: FilecoinProvider;
     let client: LotusClient;
+    const data = "some data";
+    const expectedSize = 17;
 
     before(async () => {
+      tmp.setGracefulCleanup();
       provider = await getProvider();
       client = new LotusRPC(provider, { schema: FilecoinProvider.Schema });
     });
@@ -40,14 +47,13 @@ describe("api", () => {
       });
 
       it("should accept a new deal", async () => {
-        const data = "some data";
-        const expectedSize = 15;
-
         let miners = await client.stateListMiners();
         let address = await client.walletDefaultAddress();
         let beginningBalance = await client.walletBalance(address);
 
-        let result = await ipfs.add(data);
+        let result = await ipfs.add({
+          content: data
+        });
         let cid = result.path;
 
         let proposal = new StartDealParams({
@@ -97,11 +103,11 @@ describe("api", () => {
       });
 
       it("should provide a remote offer", async () => {
-        const data = "some data";
-        const expectedSize = 15;
-        const expectedMinPrice = "30";
+        const expectedMinPrice = `${expectedSize * 2}`;
 
-        let result = await ipfs.add(data);
+        let result = await ipfs.add({
+          content: data
+        });
 
         let offers = await client.clientFindData({ "/": result.path });
 
@@ -119,7 +125,7 @@ describe("api", () => {
         assert(hasLocal);
       });
 
-      it("should 'retrieve' without error (but we all know it's not actually retrieving anything...), and subtract balance", async () => {
+      it("should retrieve without error, and subtract balance", async () => {
         const order: SerializedRetrievalOrder = {
           Root: offer.Root,
           Piece: offer.Piece,
@@ -133,7 +139,18 @@ describe("api", () => {
           MinerPeer: offer.MinerPeer
         };
 
-        await client.clientRetrieve(order);
+        const tmpObj = await tmp.dir();
+        const file = path.join(tmpObj.path, "content");
+
+        const fileRef: SerializedFileRef = {
+          Path: file,
+          IsCAR: false
+        };
+
+        await client.clientRetrieve(order, fileRef);
+
+        const content = await fs.promises.readFile(file, { encoding: "utf-8" });
+        assert.strictEqual(content, data);
 
         // No error? Great, let's make sure it subtracted the retreival cost.
 
@@ -167,10 +184,18 @@ describe("api", () => {
           }
         };
 
+        const tmpObj = await tmp.dir();
+        const file = path.join(tmpObj.path, "content");
+
+        const fileRef: SerializedFileRef = {
+          Path: file,
+          IsCAR: false
+        };
+
         let error: Error | undefined;
 
         try {
-          await client.clientRetrieve(madeUpOrder);
+          await client.clientRetrieve(madeUpOrder, fileRef);
         } catch (e) {
           error = e;
         }
