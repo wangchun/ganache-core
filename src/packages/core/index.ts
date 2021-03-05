@@ -7,6 +7,5 @@ export { ProviderOptions, ServerOptions, serverDefaults } from "./src/options";
 
 export default {
   server: (options?: ServerOptions) => new Server(options),
-  provider: (options?: ProviderOptions) =>
-    ConnectorLoader.initialize(options).provider
+  provider: (options?: ProviderOptions) => ConnectorLoader.initialize(options).provider
 };
